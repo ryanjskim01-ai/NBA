@@ -1,0 +1,147 @@
+install("tidyverse")
+install("ggplot2")
+install("plotly")
+
+library(tidyverse)  # Data manipulation and visualization
+library(ggplot2)    # Advanced plotting
+library(plotly)     # Interactive visualizations
+
+PlayerStatistics <- read.csv("PlayerStatistics.csv")
+
+Nba_Player_Salaries <- read.csv("Nba_Player_Salaries.csv")
+
+Players <- read.csv("Players.csv")
+
+Nba_Player_Salaries$X2022.2023 <- gsub("[$,]", "", Nba_Player_Salaries$X2022.2023)
+Nba_Player_Salaries$X2022.2023 <- as.numeric(Nba_Player_Salaries$X2022.2023)
+Nba_Player_Salaries$X2023.2024 <- gsub("[$,]", "", Nba_Player_Salaries$X2023.2024)
+Nba_Player_Salaries$X2023.2024 <- as.numeric(Nba_Player_Salaries$X2023.2024)
+Nba_Player_Salaries$X2024.2025 <- gsub("[$,]", "", Nba_Player_Salaries$X2024.2025)
+Nba_Player_Salaries$X2024.2025 <- as.numeric(Nba_Player_Salaries$X2024.2025)
+
+Nba_Player_Salaries$avg_salary <- rowMeans(
+  Nba_Player_Salaries[, c("X2022.2023", "X2023.2024", "X2024.2025")], 
+  na.rm = TRUE
+)
+
+head(Nba_Player_Salaries[, c("Player.Name", "avg_salary")])
+
+Players$`Player Name` <- trimws(Players$`Player Name`)
+
+# Filter to only active players (isActive == 1)
+active_players <- Players[Players$isActive == 1 & !is.na(Players$`Player Name`), ]
+active_names <- active_players$`Player Name`
+active_names <- active_names[!is.na(active_names)]
+print(paste("Number of active players:", length(active_names)))
+Nba_Player_Salaries <- Nba_Player_Salaries[Nba_Player_Salaries$Player.Name %in% active_names, ]
+print(paste("Players with salary data:", nrow(Nba_Player_Salaries)))
+
+PlayerStatistics$`Player Name` <- paste(PlayerStatistics$firstName, 
+                                        PlayerStatistics$lastName, sep = " ")
+
+PlayerStatistics$`Player Name` <- trimws(PlayerStatistics$`Player Name`)
+
+PlayerStatistics <- PlayerStatistics[PlayerStatistics$`Player Name` %in% active_names, ]
+
+PlayerStatistics <- PlayerStatistics %>%
+  group_by(`Player Name`) %>%
+  summarise(
+    Points = mean(points, na.rm = TRUE),
+    Rebounds = mean(reboundsTotal, na.rm = TRUE),
+    Assists = mean(assists, na.rm = TRUE),
+    Turnovers = mean(turnovers, na.rm = TRUE),
+    Blocks = mean(blocks, na.rm = TRUE),
+    Steals = mean(steals, na.rm = TRUE),
+    Games_Played = n()  # Count total games
+  )
+print(paste("Players with statistics:", nrow(PlayerStatistics)))
+# Formula breakdown:
+# Points: 0.75x   - High volume, less scarce in modern NBA
+# Rebounds: 0.8x  - Moderately valuable, position-dependent
+# Assists: 1.0x   - High value, creates scoring opportunities
+# Turnovers: -0.5x - Penalty for ball security issues
+# Blocks: 1.0x    - Defensive impact, relatively scarce
+# Steals: 1.0x    - High value, creates transition opportunities
+
+PlayerStatistics$value_score <- (PlayerStatistics$Points * 0.75) + 
+                                (PlayerStatistics$Rebounds * 0.8) + 
+                                (PlayerStatistics$Assists * 1.0) + 
+                                (PlayerStatistics$Turnovers * -0.5) +
+                                (PlayerStatistics$Blocks * 1.0) +
+                                (PlayerStatistics$Steals * 1.0)
+
+salary_only <- Nba_Player_Salaries %>%
+  select(Player.Name, avg_salary) %>%
+  rename(`Player Name` = Player.Name) 
+PlayerStatistics <- PlayerStatistics %>%
+  left_join(salary_only, by = "Player Name")
+PlayerStatistics <- PlayerStatistics %>%
+  filter(!is.na(avg_salary))
+
+# Build linear regression model
+# Dependent variable (Y): avg_salary
+# Independent variable (X): value_score
+salary_model <- lm(avg_salary ~ value_score, data = PlayerStatistics)
+
+# View comprehensive model summary
+summary(salary_model)
+
+r_squared <- summary(salary_model)$r.squared
+slope <- coef(salary_model)[2]
+intercept <- coef(salary_model)[1]
+# Predict what each player SHOULD earn based on their value score
+PlayerStatistics$predicted_salary <- predict(salary_model, PlayerStatistics)
+
+# Calculate difference between actual and predicted salary
+# Positive difference = Overpaid (earning more than performance suggests)
+# Negative difference = Underpaid (earning less than performance suggests)
+PlayerStatistics$salary_difference <- PlayerStatistics$avg_salary - 
+                                      PlayerStatistics$predicted_salary
+
+# Graphs
+
+p <- ggplot(PlayerStatistics, aes(x = value_score, y = avg_salary)) +
+  geom_point(aes(color = salary_difference), alpha = 0.7, size = 3) +
+  geom_smooth(method = "lm", color = "black", se = TRUE, linewidth = 1) +
+  scale_color_gradient2(
+    low = "blue",      # Underpaid
+    mid = "white",     # Fair value
+    high = "red",      # Overpaid
+    midpoint = 0, 
+    name = "Salary\nDifference",
+    labels = scales::dollar_format(scale = 1e-6, suffix = "M")
+  ) +
+  scale_y_continuous(labels = scales::dollar_format(scale = 1e-6, suffix = "M")) +
+  labs(
+    title = "NBA Player Salary vs Performance Value Score",
+    subtitle = paste0("Linear Regression (R² = ", round(r_squared, 3), ")"),
+    x = "Player Value Score (Weighted Performance Metric)",
+    y = "Average Annual Salary (2022-2025)",
+    caption = "Blue = Underpaid | Red = Overpaid | Black line = Predicted salary\nData: NBA player statistics and salary disclosures"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 14),
+    plot.subtitle = element_text(size = 11),
+    legend.position = "right"
+  )
+
+# Display the plot
+print(p)
+
+# Save static plot
+ggsave("nba_salary_vs_value.png", width = 12, height = 7, dpi = 300)
+
+# Create interactive version with plotly
+p_interactive <- ggplotly(p, tooltip = c("Player Name", "value_score", "avg_salary"))
+p_interactive
+
+write.csv(PlayerStatistics, "PlayerStatistics_final.csv", row.names = FALSE)
+
+# Export model summary for reference
+model_summary <- data.frame(
+  Metric = c("R-squared", "Slope", "Intercept", "Players_Analyzed"),
+  Value = c(r_squared, slope, intercept, nrow(PlayerStatistics))
+)
+
+write.csv(model_summary, "model_summary.csv", row.names = FALSE)
